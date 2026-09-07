@@ -85,13 +85,48 @@ function buildForwardHeaders(clientHeaders, staticHeaders, targetHost) {
 }
 
 /**
+ * 根据协议在请求体中注入推理强度默认值（仅当客户端未显式指定时）。
+ * @param {object|null} body 解析后的 JSON 请求体
+ * @param {string} protocol 目标协议：openai / anthropic
+ * @param {string} reasoningEffort 配置的推理强度，如 max
+ * @returns {boolean} 是否发生了注入
+ */
+function injectReasoningEffort(body, protocol, reasoningEffort) {
+  if (!body || typeof body !== 'object') return false;
+
+  if (protocol === 'openai') {
+    // OpenAI 协议：推理强度为请求体顶层字段 reasoning_effort
+    if (body.reasoning_effort === undefined) {
+      body.reasoning_effort = reasoningEffort;
+      return true;
+    }
+  } else if (protocol === 'anthropic') {
+    // Anthropic 协议：自适应思考模式 + 顶层 output_config.effort 控制推理强度
+    if (body.thinking === undefined && body.output_config === undefined) {
+      body.thinking = { type: 'adaptive' };
+      body.output_config = { effort: reasoningEffort };
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
  * 创建反向代理请求处理函数。
  * @param {URL} targetUrl 目标地址
  * @param {object} staticHeaders 需要附加的静态请求头
  * @param {import('http').Agent} agent 复用连接用的 Agent
+ * @param {object} [options] 可选配置
+ * @param {string} [options.protocol] 目标协议（openai / anthropic），默认 openai
+ * @param {string} [options.reasoningEffort] 推理强度默认值；配置后会在请求体中注入
  * @returns {Function} HTTP 请求处理回调
  */
-function createProxyHandler(targetUrl, staticHeaders, agent) {
+function createProxyHandler(targetUrl, staticHeaders, agent, options = {}) {
+  const { protocol = 'openai', reasoningEffort } = options;
+  // 仅当配置了推理强度且协议受支持时才需要改写请求体
+  const shouldInject =
+    reasoningEffort && (protocol === 'openai' || protocol === 'anthropic');
   return (clientReq, clientRes) => {
     const startTime = Date.now();
     const forwardHeaders = buildForwardHeaders(
@@ -100,8 +135,12 @@ function createProxyHandler(targetUrl, staticHeaders, agent) {
       targetUrl.host
     );
 
-    // 保留客户端原始路径与查询参数
-    const forwardPath = clientReq.url;
+    // 将客户端原始路径与查询参数拼接到 target 的路径之后。
+    // 例如 target 为 https://opencode.ai/zen/go/v1 时，
+    // 请求 /chat/completions 会转发到 https://opencode.ai/zen/go/v1/chat/completions
+    const targetBasePath =
+      targetUrl.pathname === '/' ? '' : targetUrl.pathname.replace(/\/+$/, '');
+    const forwardPath = targetBasePath + clientReq.url;
 
     const options = {
       protocol: targetUrl.protocol,
@@ -141,20 +180,51 @@ function createProxyHandler(targetUrl, staticHeaders, agent) {
       }
     });
 
-    // 将客户端请求体流式转发给上游
-    clientReq.pipe(upstreamReq);
+    // 无需改写请求体时，直接流式转发，保持最小延迟与内存占用
+    if (!shouldInject) {
+      clientReq.pipe(upstreamReq);
+      return;
+    }
+
+    // 需要注入推理强度：缓冲请求体，解析 JSON 并注入默认值后转发
+    const chunks = [];
+    clientReq.on('data', (chunk) => chunks.push(chunk));
+    clientReq.on('end', () => {
+      const body = Buffer.concat(chunks);
+      let finalBody = body;
+
+      if (body.length) {
+        try {
+          const parsed = JSON.parse(body.toString('utf8'));
+          if (injectReasoningEffort(parsed, protocol, reasoningEffort)) {
+            finalBody = Buffer.from(JSON.stringify(parsed), 'utf8');
+            // 注入成功无需打印，避免刷屏；仅注入失败（JSON 解析失败）时记录日志
+            // log(`已注入推理强度: ${protocol} reasoning_effort=${reasoningEffort}`);
+          }
+        } catch (err) {
+          log(`请求体 JSON 解析失败，跳过推理强度注入: ${err.message}`);
+        }
+      }
+
+      // 缓冲模式下显式设置 content-length，避免使用 chunked 编码
+      upstreamReq.setHeader('Content-Length', finalBody.length);
+      upstreamReq.end(finalBody);
+    });
   };
 }
 
 /**
  * 启动反向代理服务。
- * @param {object} config 代理配置（target/httpPort）
+ * @param {object} config 代理配置（target/httpPort/protocol/reasoningEffort）
  * @param {object} staticHeaders 附加的静态请求头
  */
 function startProxy(config, staticHeaders) {
   const targetUrl = new URL(config.target);
   const agent = createAgent(targetUrl);
-  const handler = createProxyHandler(targetUrl, staticHeaders, agent);
+  const handler = createProxyHandler(targetUrl, staticHeaders, agent, {
+    protocol: config.protocol || 'openai',
+    reasoningEffort: config.reasoningEffort,
+  });
 
   const httpServer = http.createServer(handler);
   httpServer.on('error', (err) => {
@@ -162,8 +232,7 @@ function startProxy(config, staticHeaders) {
     process.exit(1);
   });
   httpServer.listen(config.httpPort, () => {
-    log(`反向代理已启动: http://0.0.0.0:${config.httpPort} => ${config.target}`);
-    log('请将 AI Agent 的接口地址指向该地址，代理会自动附加配置的请求头并转发目标地址');
+    log(`反向代理已启动: http://127.0.0.1:${config.httpPort} => ${config.target}`);
   });
 }
 
