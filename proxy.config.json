@@ -1,0 +1,7 @@
+{
+  "target": "https://opencode.ai/zen/go/v1/chat/completions",
+  "httpPort": 8787,
+  "headers": {
+    "x-opencode-session": "REPLACE_WITH_YOUR_SESSION"
+  }
+}
