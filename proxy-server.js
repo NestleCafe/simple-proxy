@@ -1,9 +1,8 @@
 'use strict';
 
-const http = require('http');
-const https = require('https');
-const fs = require('fs');
-const path = require('path');
+import http from 'http';
+import https from 'https';
+import proxyConfigs from './proxy.config.js';
 
 // hop-by-hop 请求头属于逐跳传输信息，不应透传给上游服务器
 const HOP_BY_HOP_HEADERS = [
@@ -16,20 +15,6 @@ const HOP_BY_HOP_HEADERS = [
   'transfer-encoding',
   'upgrade',
 ];
-
-/**
- * 读取并解析 JSON 配置文件。
- * @param {string} filePath 配置文件绝对路径
- * @returns {object} 解析后的配置对象
- */
-function loadJsonConfig(filePath) {
-  try {
-    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
-  } catch (err) {
-    console.error(`读取配置文件失败: ${filePath}`);
-    throw err;
-  }
-}
 
 /**
  * 输出带时间戳的结构化日志。
@@ -103,7 +88,7 @@ function injectReasoningEffort(body, protocol, reasoningEffort) {
   } else if (protocol === 'anthropic') {
     // Anthropic 协议：自适应思考模式 + 顶层 output_config.effort 控制推理强度
     if (body.thinking === undefined && body.output_config === undefined) {
-      body.thinking = { type: 'adaptive' };
+      // body.thinking = { type: 'enabled' };
       body.output_config = { effort: reasoningEffort };
       return true;
     }
@@ -237,19 +222,23 @@ function startProxy(config, staticHeaders) {
 }
 
 /**
- * 程序入口：加载配置并启动代理。
+ * 程序入口：加载配置并启动一个或多个代理实例（多端口并行）。
  */
 function main() {
-  const configFile = path.resolve(__dirname, 'proxy.config.json');
-
   try {
-    const config = loadJsonConfig(configFile);
+    // 兼容单个对象与数组两种写法，统一视为代理实例列表
+    const proxies = Array.isArray(proxyConfigs) ? proxyConfigs : [proxyConfigs];
 
-    if (!config.target) {
-      throw new Error('proxy.config.json 中缺少 "target" 配置项');
+    if (!proxies.length) {
+      throw new Error('proxy.config.js 中未配置任何代理实例');
     }
 
-    startProxy(config, config.headers || {});
+    proxies.forEach((proxyConfig, index) => {
+      if (!proxyConfig.target) {
+        throw new Error(`proxy.config.js 第 ${index + 1} 个配置缺少 "target" 配置项`);
+      }
+      startProxy(proxyConfig, proxyConfig.headers || {});
+    });
   } catch (err) {
     console.error(`启动失败: ${err.message}`);
     process.exit(1);

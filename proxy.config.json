@@ -1,9 +1,0 @@
-{
-  "target": "https://opencode.ai/zen/go/v1",
-  "httpPort": 8787,
-  "protocol": "openai",
-  "reasoningEffort": "max",
-  "headers": {
-    "x-opencode-session": "AGENT-OPENCODE-SESSION"
-  }
-}

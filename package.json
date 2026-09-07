@@ -1,8 +1,9 @@
 {
-  "name": "trae-proxy",
+  "name": "simple-proxy",
   "version": "1.0.0",
   "description": "基于 Node.js 原生模块的轻量反向代理：转发请求到配置的目标 URL，并附加配置的请求头",
   "main": "proxy-server.js",
+  "type": "module",
   "scripts": {
     "start": "node proxy-server.js"
   },
