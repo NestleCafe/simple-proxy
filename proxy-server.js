@@ -80,15 +80,20 @@ function injectReasoningEffort(body, protocol, reasoningEffort) {
   if (!body || typeof body !== 'object') return false;
 
   if (protocol === 'openai') {
-    // OpenAI 协议：推理强度为请求体顶层字段 reasoning_effort
+    // OpenAI 协议
+    // reasoning_effort 推理强度
     if (body.reasoning_effort === undefined) {
       body.reasoning_effort = reasoningEffort;
       return true;
     }
   } else if (protocol === 'anthropic') {
-    // Anthropic 协议：自适应思考模式 + 顶层 output_config.effort 控制推理强度
-    if (body.thinking === undefined && body.output_config === undefined) {
-      // body.thinking = { type: 'enabled' };
+    // Anthropic 协议
+    if (body.output_config == undefined) {
+      // thinking.type: enabled（开启思考模式）/ disabled（关闭思考模式）
+      if (body.thinking == undefined) {
+        body.thinking = { type: 'enabled' };
+      }
+
       body.output_config = { effort: reasoningEffort };
       return true;
     }

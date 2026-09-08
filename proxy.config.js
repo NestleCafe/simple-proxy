@@ -10,13 +10,14 @@ export default [
     httpPort: 8787,
     // 目标协议（可选）：openai（默认）或 anthropic，决定推理强度的注入方式。
     protocol: 'openai',
-    // 推理强度默认值（可选，如 max、high）：客户端请求体未显式指定推理强度
-    // 相关字段时，按 protocol 注入对应字段；不配置则完全透明转发。
+    // 推理强度（可选）
+    // 若客户端请求体未显式指定推理强度相关字段，则按 `protocol` 注入对应字段；
+    // 不配置则完全透明转发。
     reasoningEffort: 'max',
     // 附加的静态请求头（键值对），如认证令牌；与客户端透传头同名时以这里为准。
     headers: {
       'x-opencode-session': 'AGENT-OPENCODE-SESSION',
-    },
+    }
   },
   {
     target: 'https://opencode.ai/zen/go',
@@ -25,6 +26,6 @@ export default [
     reasoningEffort: 'max',
     headers: {
       'x-opencode-session': 'AGENT-OPENCODE-SESSION',
-    },
-  },
+    }
+  }
 ];

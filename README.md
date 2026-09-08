@@ -73,8 +73,8 @@ node proxy-server.js
 推理强度注入行为：
 
 - `protocol` 为 `openai` 时，注入请求体顶层字段 `reasoning_effort`（如 `"max"`）
-- `protocol` 为 `anthropic` 时，注入 `thinking: { "type": "adaptive" }` 与顶层字段 `output_config: { "effort": "max" }`
-- 客户端已显式传入对应字段（`reasoning_effort` / `thinking` / `output_config`）时不覆盖
+- `protocol` 为 `anthropic` 时，注入 `thinking: { "type": "enabled" }` 与顶层字段 `output_config: { "effort": "max" }`
+- 客户端请求体已存在 `reasoning_effort`（OpenAI）或 `output_config` 字段（Anthropic）时不注入
 - 未配置 `reasoningEffort` 或 `protocol` 为不支持的取值时，请求体不做任何改写，保持原样流式转发
 
 ### 配置示例

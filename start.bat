@@ -6,7 +6,7 @@ rem Switch to the directory where this script resides
 cd /d "%~dp0"
 
 echo ========================================
-echo   trae-proxy reverse proxy launcher
+echo  reverse proxy launcher
 echo ========================================
 echo.
 
