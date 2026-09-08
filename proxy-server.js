@@ -21,7 +21,20 @@ const HOP_BY_HOP_HEADERS = [
  * @param {string} message 日志内容
  */
 function log(message) {
-  console.log(`[${new Date().toISOString()}] ${message}`);
+  console.log(`[${formatLocalTime(new Date())}] ${message}`);
+}
+
+/**
+ * 将日期格式化为本地时间的 ISO 风格字符串（YYYY-MM-DDTHH:mm:ss）。
+ * @param {Date} date 待格式化的日期对象
+ * @returns {string} 本地时间的字符串
+ */
+function formatLocalTime(date) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return (
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ` +
+    `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+  );
 }
 
 /**

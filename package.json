@@ -1,7 +1,7 @@
 {
   "name": "simple-proxy",
   "version": "1.0.0",
-  "description": "基于 Node.js 原生模块的轻量反向代理：转发请求到配置的目标 URL，并附加配置的请求头",
+  "description": "基于 Node.js 原生模块（零依赖）的轻量反向代理，面向 AI Agent 调用场景的轻量反向代理，支持自定义请求头与推理强度（reasoning effort）注入。",
   "main": "proxy-server.js",
   "type": "module",
   "scripts": {
