@@ -41,8 +41,10 @@ export const useConfigStore = defineStore('config', () => {
   // 是否正在保存配置
   const saving = ref(false);
 
-  // 已启用的实例数量
-  const enabledCount = computed(() => instances.value.filter((item) => item.enabled).length);
+  // 正在运行的实例数量（反映实际监听状态）
+  const runningCount = computed(
+    () => instances.value.filter((item) => item.state === 'running').length,
+  );
 
   /**
    * 根据实例 id 获取监听端口号（用于多条提示文案拼接），找不到实例时回退为 id 文本。
@@ -308,7 +310,7 @@ export const useConfigStore = defineStore('config', () => {
     loading,
     loadWarning,
     saving,
-    enabledCount,
+    runningCount,
     load,
     save,
     start,

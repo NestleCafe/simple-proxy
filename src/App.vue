@@ -34,7 +34,7 @@
         <h2 class="toolbar-title">{{ currentTitle }}</h2>
         <div class="toolbar-actions">
           <el-tag type="info" effect="plain">
-            已启用 {{ configStore.enabledCount }} / {{ configStore.instances.length }}
+            运行中 {{ configStore.runningCount }} / {{ configStore.instances.length }}
           </el-tag>
           <el-button :loading="configStore.loading" @click="handleRefresh">
             <el-icon><Refresh /></el-icon>

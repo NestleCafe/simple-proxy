@@ -432,10 +432,14 @@ impl Engine {
 
     /// 保存配置并同步实例运行状态，返回需要重启才能生效的实例 id 列表。
     ///
+    /// **保存配置不会自动启动实例**：只有把已存在实例的「启用」开关由关闭改为打开
+    /// 时才会自动启动该实例（新建实例、编辑实例都不会触发启动）。
+    ///
     /// 处理规则（配置写盘成功后）：
     /// - 被禁用且正在运行 → 立即停止（开关关闭立即停）
-    /// - 被启用且未运行（含新增、重新启用、错误状态）→ 立即启动
-    /// - 保持运行但转发相关字段变化 → 记入 restartRequired（不自动重启，仅提示）
+    /// - 旧配置中已存在且为禁用、新配置改为启用且当前未运行 → 立即启动（重新启用）
+    /// - 新建实例、旧配置中已启用但未运行的实例 → 保持未运行，不自动启动
+    /// - 保持运行但转发相关字段变化 → 记入 restartRequired（不自动重启，仅提示需手动重启）
     /// - 新配置中已删除 → 若在运行先停止，再清理运行时记录
     pub async fn save_config(&self, new_config: AppConfig) -> Result<Vec<String>, String> {
         // 1. 校验并写盘（不持锁，避免磁盘 IO 阻塞其它命令）
@@ -459,7 +463,7 @@ impl Engine {
                 .collect();
             let known_ids: Vec<String> = inner.runtimes.keys().cloned().collect();
 
-            let plan = plan_save_changes(&new_config, &running, &known_ids);
+            let plan = plan_save_changes(&inner.config, &new_config, &running, &known_ids);
             inner.config = new_config;
             plan
         };
@@ -682,7 +686,7 @@ struct SavePlan {
     restart_required: Vec<String>,
     /// 需要立即停止（被禁用或已从配置中删除）
     to_stop: Vec<String>,
-    /// 需要立即启动（已启用但当前未运行）
+    /// 需要立即启动（启用开关由关转开且当前未运行）
     to_start: Vec<String>,
     /// 新配置中已删除的实例 id（停止后需清理运行时记录）
     removed: Vec<String>,
@@ -735,9 +739,16 @@ fn plan_start_all(config: &AppConfig, runtimes: &HashMap<String, InstanceRuntime
 
 /// 计算保存配置后需要执行的启停动作（纯函数，不依赖 Tauri，便于单元测试）。
 ///
+/// 保存配置不会自动启动实例：仅当实例在旧配置中**已存在且为禁用**、新配置改为启用
+/// 且当前未运行时才立即启动（对应「重新启用」语义）；新建实例、旧配置中本就启用的
+/// 实例（含 stopped/error）都保持原状。
+///
+/// - `old_config`：保存前的配置（判断实例此前是否存在、是否处于禁用状态）
+/// - `new_config`：保存后的新配置
 /// - `running`：当前运行中的实例 id → 启动时使用的配置副本
 /// - `known_ids`：当前存在运行时记录的实例 id（含已停止与错误状态的实例）
 fn plan_save_changes(
+    old_config: &AppConfig,
     new_config: &AppConfig,
     running: &BTreeMap<String, ProxyInstance>,
     known_ids: &[String],
@@ -747,6 +758,12 @@ fn plan_save_changes(
         .proxies
         .iter()
         .map(|item| item.id.as_str())
+        .collect();
+    // 旧配置中每个实例的启用开关；查不到的 id 表示本次新建
+    let old_enabled: BTreeMap<&str, bool> = old_config
+        .proxies
+        .iter()
+        .map(|item| (item.id.as_str(), item.enabled))
         .collect();
 
     // 1. 已从配置中删除的实例：运行中的需要停止，全部需要清理运行时记录
@@ -759,7 +776,7 @@ fn plan_save_changes(
         }
     }
 
-    // 2. 新配置中的实例：按「被禁用 / 已启用」与当前状态决定停止或启动
+    // 2. 新配置中的实例：按当前运行状态与「启用开关是否由关转开」决定动作
     for instance in &new_config.proxies {
         match running.get(&instance.id) {
             Some(started) => {
@@ -771,7 +788,9 @@ fn plan_save_changes(
                 }
             }
             None => {
-                if instance.enabled {
+                // 仅「旧配置已存在且为禁用 → 新配置启用」才自动启动；
+                // 新建实例（旧配置中不存在）与旧配置中已启用的实例都不自动启动
+                if instance.enabled && old_enabled.get(instance.id.as_str()) == Some(&false) {
                     plan.to_start.push(instance.id.clone());
                 }
             }
@@ -832,6 +851,7 @@ mod tests {
         let started = instance("a");
         let plan = plan_save_changes(
             &config_of(vec![started.clone()]),
+            &config_of(vec![started.clone()]),
             &running_of(vec![started]),
             &ids_of(&["a"]),
         );
@@ -866,6 +886,7 @@ mod tests {
             mutate(&mut updated);
 
             let plan = plan_save_changes(
+                &config_of(vec![started.clone()]),
                 &config_of(vec![updated]),
                 &running_of(vec![started]),
                 &ids_of(&["a"]),
@@ -882,8 +903,10 @@ mod tests {
         let mut started = instance("a");
         started.enabled = false;
 
-        // 当前配置为已启用：仅启用标记不同，转发字段未变，不应提示重启
+        // 旧配置为禁用、新配置为启用（开关由关转开），但实例当前仍在运行：
+        // 转发字段未变，既不提示重启也不重复启动
         let plan = plan_save_changes(
+            &config_of(vec![started.clone()]),
             &config_of(vec![instance("a")]),
             &running_of(vec![started]),
             &ids_of(&["a"]),
@@ -903,6 +926,7 @@ mod tests {
         disabled.target = "https://other.example.com/v1".to_string();
 
         let plan = plan_save_changes(
+            &config_of(vec![started.clone()]),
             &config_of(vec![disabled]),
             &running_of(vec![started]),
             &ids_of(&["a"]),
@@ -914,21 +938,52 @@ mod tests {
     }
 
     #[test]
-    fn 启用未运行实例立即启动() {
-        // 新增实例（无运行时记录）
-        let plan = plan_save_changes(&config_of(vec![instance("new")]), &BTreeMap::new(), &[]);
-        assert_eq!(plan.to_start, ids_of(&["new"]));
-        assert!(plan.to_stop.is_empty(), "{plan:?}");
-        assert!(plan.restart_required.is_empty(), "{plan:?}");
+    fn 启用开关由关转开的未运行实例立即启动() {
+        // 旧配置中已存在且为禁用，新配置改为启用，当前未运行 → 启动
+        let mut old_disabled = instance("a");
+        old_disabled.enabled = false;
 
-        // 重新启用已停止实例（存在运行时记录但未运行）
         let plan = plan_save_changes(
+            &config_of(vec![old_disabled]),
             &config_of(vec![instance("a")]),
             &BTreeMap::new(),
             &ids_of(&["a"]),
         );
+
         assert_eq!(plan.to_start, ids_of(&["a"]));
         assert!(plan.to_stop.is_empty(), "{plan:?}");
+        assert!(plan.restart_required.is_empty(), "{plan:?}");
+    }
+
+    #[test]
+    fn 新建实例即使启用也不自动启动() {
+        // 旧配置中不存在该实例（新建）：即使启用且未运行也不启动
+        let plan = plan_save_changes(
+            &config_of(vec![]),
+            &config_of(vec![instance("new")]),
+            &BTreeMap::new(),
+            &[],
+        );
+
+        assert!(plan.to_start.is_empty(), "{plan:?}");
+        assert!(plan.to_stop.is_empty(), "{plan:?}");
+        assert!(plan.restart_required.is_empty(), "{plan:?}");
+        assert!(plan.removed.is_empty(), "{plan:?}");
+    }
+
+    #[test]
+    fn 原本已启用的未运行实例保存后不启动() {
+        // 旧配置与新配置均为启用，实例处于 stopped/error（存在运行时记录但未运行）→ 不启动
+        let plan = plan_save_changes(
+            &config_of(vec![instance("a")]),
+            &config_of(vec![instance("a")]),
+            &BTreeMap::new(),
+            &ids_of(&["a"]),
+        );
+
+        assert!(plan.to_start.is_empty(), "{plan:?}");
+        assert!(plan.to_stop.is_empty(), "{plan:?}");
+        assert!(plan.restart_required.is_empty(), "{plan:?}");
     }
 
     #[test]
@@ -937,6 +992,7 @@ mod tests {
         disabled.enabled = false;
 
         let plan = plan_save_changes(
+            &config_of(vec![disabled.clone()]),
             &config_of(vec![disabled]),
             &BTreeMap::new(),
             &ids_of(&["a"]),
@@ -952,6 +1008,7 @@ mod tests {
     fn 已删除的运行实例立即停止并清理记录() {
         let started = instance("a");
         let plan = plan_save_changes(
+            &config_of(vec![started.clone()]),
             &config_of(vec![]),
             &running_of(vec![started]),
             &ids_of(&["a"]),
@@ -965,7 +1022,12 @@ mod tests {
 
     #[test]
     fn 已删除的停止实例仅清理记录() {
-        let plan = plan_save_changes(&config_of(vec![]), &BTreeMap::new(), &ids_of(&["a"]));
+        let plan = plan_save_changes(
+            &config_of(vec![instance("a")]),
+            &config_of(vec![]),
+            &BTreeMap::new(),
+            &ids_of(&["a"]),
+        );
 
         assert_eq!(plan.removed, ids_of(&["a"]));
         assert!(plan.to_stop.is_empty(), "{plan:?}");
@@ -982,6 +1044,13 @@ mod tests {
         c.http_port = 7003;
         let mut e = instance("e");
         e.http_port = 7005;
+        // f：旧配置中为禁用，新配置改为启用（未运行）
+        let mut f = instance("f");
+        f.http_port = 7006;
+        f.enabled = false;
+
+        // 旧配置：a、b、c、e 为启用；f 为禁用
+        let old_config = config_of(vec![a.clone(), b.clone(), c.clone(), e.clone(), f.clone()]);
 
         // 运行中：a（端口将被修改）、b（无变化）、c（将被禁用）、e（将从配置中删除）
         let running = running_of(vec![a.clone(), b.clone(), c.clone(), e.clone()]);
@@ -990,14 +1059,21 @@ mod tests {
         a_updated.http_port = 8001;
         let mut c_updated = c.clone();
         c_updated.enabled = false;
-        // 新配置：a（端口变化）、b（不变）、c（禁用）、d（新增）；e 被删除
-        let new_config = config_of(vec![a_updated, b, c_updated, instance("d")]);
+        let mut f_updated = f.clone();
+        f_updated.enabled = true;
+        // 新配置：a（端口变化）、b（不变）、c（禁用）、d（新增）、f（重新启用）；e 被删除
+        let new_config = config_of(vec![a_updated, b, c_updated, instance("d"), f_updated]);
 
-        let plan = plan_save_changes(&new_config, &running, &ids_of(&["a", "b", "c", "e"]));
+        let plan = plan_save_changes(
+            &old_config,
+            &new_config,
+            &running,
+            &ids_of(&["a", "b", "c", "e", "f"]),
+        );
 
         assert_eq!(sorted(plan.restart_required), ids_of(&["a"]));
         assert_eq!(sorted(plan.to_stop), ids_of(&["c", "e"]));
-        assert_eq!(sorted(plan.to_start), ids_of(&["d"]));
+        assert_eq!(sorted(plan.to_start), ids_of(&["f"]));
         assert_eq!(sorted(plan.removed), ids_of(&["e"]));
     }
 

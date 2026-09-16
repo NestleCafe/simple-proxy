@@ -186,7 +186,8 @@ async function handleSave(): Promise<void> {
   const effort = form.reasoningEffort.trim();
   const payload: ProxyInstance = {
     id: props.instance?.id ?? crypto.randomUUID(),
-    enabled: props.instance?.enabled ?? true,
+    // 新建实例默认未启用（保存后不会自动启动，需手动打开启用开关）
+    enabled: props.instance?.enabled ?? false,
     target: form.target.trim(),
     httpPort: Math.trunc(form.httpPort),
     protocol: form.protocol,
