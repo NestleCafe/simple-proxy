@@ -5,6 +5,10 @@
 ```
 AI Agent ──http──▶ 代理实例(:8787) ──https──▶ 目标 API
 ```
+<img width="1985" height="1185" alt="image" src="https://github.com/user-attachments/assets/240fb614-1b2c-4ede-bb6d-1daf8d8836bb" />
+
+<img width="1985" height="1185" alt="image" src="https://github.com/user-attachments/assets/e83a4add-3d34-4858-b373-d1c42a63cf90" />
+
 
 ## 功能特性
 
