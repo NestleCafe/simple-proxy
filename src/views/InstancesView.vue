@@ -4,7 +4,7 @@
       <el-input
         v-model="keyword"
         clearable
-        placeholder="搜索名称 / 端口 / 目标"
+        placeholder="搜索端口 / 目标 / 协议"
         :prefix-icon="Search"
         class="search-input"
       />
@@ -35,15 +35,23 @@
         height="100%"
         class="instances-table"
       >
-        <el-table-column label="名称" min-width="200">
+        <el-table-column label="监听端口" width="180">
           <template #default="{ row }">
-            <div class="name-cell">
-              <span class="name-text">{{ row.name }}</span>
-              <span class="name-subtitle">http://127.0.0.1:{{ row.httpPort }}</span>
+            <div class="port-cell">
+              <span class="port-text">{{ row.httpPort }}</span>
+              <el-button
+                link
+                type="primary"
+                size="small"
+                class="port-address"
+                title="点击复制"
+                @click="handleCopyAddress(row.httpPort)"
+              >
+                {{ resolveAddress(row.httpPort) }}
+              </el-button>
             </div>
           </template>
         </el-table-column>
-        <el-table-column prop="httpPort" label="监听端口" width="100" />
         <el-table-column prop="target" label="目标地址" min-width="220" show-overflow-tooltip />
         <el-table-column label="协议" width="110">
           <template #default="{ row }">
@@ -80,7 +88,7 @@
             />
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="250" fixed="right">
+        <el-table-column label="操作" header-align="center" width="250" fixed="right">
           <template #default="{ row }">
             <el-tooltip
               :content="row.enabled === false ? '实例已禁用，请先启用' : ''"
@@ -95,7 +103,7 @@
                   :disabled="row.enabled === false || row.state === 'running'"
                   @click="configStore.start(row.id)"
                 >
-                  开始
+                  启动
                 </el-button>
               </span>
             </el-tooltip>
@@ -103,7 +111,7 @@
               link
               type="primary"
               size="small"
-              :disabled="row.state === 'stopped'"
+              :disabled="row.state !== 'running'"
               @click="configStore.stop(row.id)"
             >
               停止
@@ -112,7 +120,7 @@
               link
               type="primary"
               size="small"
-              :disabled="row.state === 'stopped'"
+              :disabled="row.state !== 'running'"
               @click="configStore.restart(row.id)"
             >
               重启
@@ -161,8 +169,8 @@
             :class="{ 'is-info': isInfoEntry(entry) }"
           >
             <span class="log-cell log-time">{{ entry.time }}</span>
-            <span class="log-cell log-instance" :title="entry.instanceName">
-              {{ entry.instanceName }}
+            <span class="log-cell log-instance" :title="`端口 ${entry.instancePort}`">
+              {{ entry.instancePort }}
             </span>
             <span class="log-cell log-method" :class="methodClass(entry.method)">
               {{ entry.method }}
@@ -291,7 +299,7 @@ function formatDuration(durationMs: number | null | undefined): string {
 
 const configStore = useConfigStore();
 const logsStore = useLogsStore();
-// 搜索关键字（按名称/端口/目标过滤）
+// 搜索关键字（按端口/目标/协议过滤）
 const keyword = ref('');
 // 编辑对话框是否可见
 const dialogVisible = ref(false);
@@ -314,9 +322,9 @@ const filteredInstances = computed(() => {
   }
   return configStore.instances.filter(
     (item) =>
-      item.name.toLowerCase().includes(text) ||
       String(item.httpPort).includes(text) ||
-      item.target.toLowerCase().includes(text),
+      item.target.toLowerCase().includes(text) ||
+      item.protocol.toLowerCase().includes(text),
   );
 });
 
@@ -344,7 +352,6 @@ function handleCreate(): void {
 function handleEdit(row: InstanceInfo): void {
   editingInstance.value = {
     id: row.id,
-    name: row.name,
     enabled: row.enabled,
     target: row.target,
     httpPort: row.httpPort,
@@ -416,12 +423,75 @@ async function scrollToBottom(): Promise<void> {
 }
 
 /**
+ * 生成实例的本地访问地址。
+ * @param httpPort 实例监听端口
+ * @returns 形如 http://127.0.0.1:8787 的地址
+ */
+function resolveAddress(httpPort: number): string {
+  return `http://127.0.0.1:${httpPort}`;
+}
+
+/**
+ * 复制文本到剪贴板：优先使用异步剪贴板 API，失败时回退到临时 textarea 方案。
+ * @param text 待复制的文本
+ * @returns 是否复制成功
+ */
+async function copyToClipboard(text: string): Promise<boolean> {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      // 权限不足或非安全上下文时复制失败，继续尝试回退方案
+    }
+  }
+  return copyByExecCommand(text);
+}
+
+/**
+ * 回退的复制方案：借助临时 textarea 与 execCommand('copy') 完成复制。
+ * @param text 待复制的文本
+ * @returns 是否复制成功
+ */
+function copyByExecCommand(text: string): boolean {
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  // 移出可视区域，避免复制过程引起页面滚动或闪烁
+  textarea.style.position = 'fixed';
+  textarea.style.top = '-1000px';
+  textarea.style.opacity = '0';
+  document.body.appendChild(textarea);
+  textarea.select();
+  try {
+    return document.execCommand('copy');
+  } catch {
+    return false;
+  } finally {
+    // 无论成败都要移除临时元素，避免残留 DOM
+    document.body.removeChild(textarea);
+  }
+}
+
+/**
+ * 复制实例的本地访问地址到剪贴板，并提示复制结果。
+ * @param httpPort 实例监听端口
+ */
+async function handleCopyAddress(httpPort: number): Promise<void> {
+  const copied = await copyToClipboard(resolveAddress(httpPort));
+  if (copied) {
+    ElMessage.success('复制成功');
+  } else {
+    ElMessage.error('复制失败，请手动复制');
+  }
+}
+
+/**
  * 删除实例：二次确认后保存不含该实例的配置。
  * @param row 待删除的实例行数据
  */
 async function handleDelete(row: InstanceInfo): Promise<void> {
   try {
-    await ElMessageBox.confirm(`确定删除实例「${row.name}」吗？`, '删除确认', {
+    await ElMessageBox.confirm(`确定删除监听端口 ${row.httpPort} 的实例吗？`, '删除确认', {
       type: 'warning',
       confirmButtonText: '删除',
       cancelButtonText: '取消',
@@ -439,6 +509,7 @@ async function handleDelete(row: InstanceInfo): Promise<void> {
   await configStore.save({
     version: current.version,
     closeBehavior: current.closeBehavior,
+    closeBehaviorConfirmed: current.closeBehaviorConfirmed,
     proxies: current.proxies.filter((item) => item.id !== row.id),
   });
 }
@@ -503,27 +574,31 @@ watch(
   border-radius: 6px;
 }
 
-.name-cell {
+/* 监听端口单元格：上行端口号、下行可点击复制的完整地址 */
+.port-cell {
   display: flex;
   flex-direction: column;
+  align-items: flex-start;
   line-height: 1.4;
 }
 
-.name-text {
+.port-text {
   font-weight: 500;
   color: #303133;
 }
 
-.name-subtitle {
+.port-address {
+  height: auto;
+  padding: 0;
   font-size: 12px;
-  color: #909399;
+  font-weight: 400;
 }
 
 .effort-text {
   color: #606266;
 }
 
-/* 包裹「开始」按钮的 span：保证与后续按钮的间距不变（disabled 按钮需外层元素承接 tooltip） */
+/* 包裹「启动」按钮的 span：保证与后续按钮的间距不变（disabled 按钮需外层元素承接 tooltip） */
 .action-item {
   display: inline-flex;
   margin-right: 12px;

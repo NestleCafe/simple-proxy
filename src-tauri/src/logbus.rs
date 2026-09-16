@@ -53,14 +53,14 @@ pub fn emit_instance_state(app: &AppHandle, id: &str, state: &str, error: Option
 pub fn emit_info_log(
     app: &AppHandle,
     instance_id: &str,
-    instance_name: &str,
+    instance_port: u16,
     target: &str,
     message: &str,
 ) {
     let entry = AccessLogEntry {
         time: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
         instance_id: instance_id.to_string(),
-        instance_name: instance_name.to_string(),
+        instance_port,
         method: INFO_METHOD.to_string(),
         path: message.to_string(),
         target: target.to_string(),

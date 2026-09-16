@@ -11,7 +11,7 @@
         <el-option
           v-for="instance in configStore.instances"
           :key="instance.id"
-          :label="`${instance.name} (${instance.httpPort})`"
+          :label="`端口 ${instance.httpPort}`"
           :value="instance.id"
         />
       </el-select>
@@ -42,7 +42,7 @@
           :class="{ 'is-info': isInfoEntry(entry) }"
         >
           <span class="log-cell log-time">{{ entry.time }}</span>
-          <span class="log-cell log-instance" :title="entry.instanceName">{{ entry.instanceName }}</span>
+          <span class="log-cell log-instance" :title="`端口 ${entry.instancePort}`">{{ entry.instancePort }}</span>
           <span class="log-cell log-method" :class="methodClass(entry.method)">{{ entry.method }}</span>
           <span class="log-cell log-path" :title="entry.path">{{ entry.path }}</span>
           <span class="log-cell log-target" :title="entry.target">{{ entry.target }}</span>

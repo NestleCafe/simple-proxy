@@ -1,6 +1,6 @@
 //! 配置模块：负责 config.json 的读取、校验、保存，以及配置损坏时的备份与恢复。
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
@@ -34,8 +34,6 @@ fn default_close_behavior() -> String {
 pub struct ProxyInstance {
     /// 实例唯一标识
     pub id: String,
-    /// 实例名称（界面展示用）
-    pub name: String,
     /// 是否启用
     pub enabled: bool,
     /// 转发目标地址（http/https，可包含路径前缀）
@@ -63,17 +61,21 @@ pub struct AppConfig {
     /// 关闭主窗口时的行为：minimize（最小化到托盘）/ exit（退出应用）
     #[serde(default = "default_close_behavior")]
     pub close_behavior: String,
+    /// 是否已确认过关窗行为：false 时首次点击关闭按钮会弹窗询问
+    #[serde(default)]
+    pub close_behavior_confirmed: bool,
     /// 代理实例列表
     #[serde(default)]
     pub proxies: Vec<ProxyInstance>,
 }
 
 impl Default for AppConfig {
-    /// 生成默认空配置（版本 1、最小化到托盘、无代理实例）
+    /// 生成默认空配置（版本 1、最小化到托盘、未确认关窗行为、无代理实例）
     fn default() -> Self {
         Self {
             version: default_version(),
             close_behavior: default_close_behavior(),
+            close_behavior_confirmed: false,
             proxies: Vec::new(),
         }
     }
@@ -154,18 +156,16 @@ pub fn validate(config: &AppConfig) -> Result<(), String> {
     }
 
     let mut ids: HashSet<&str> = HashSet::new();
-    let mut ports: HashMap<u16, String> = HashMap::new();
+    let mut ports: HashSet<u16> = HashSet::new();
 
     for (index, instance) in config.proxies.iter().enumerate() {
-        // 错误信息优先使用实例名称，缺失时退化为序号与 id
-        let label = if instance.name.trim().is_empty() {
-            if instance.id.trim().is_empty() {
-                format!("第 {} 个实例", index + 1)
-            } else {
-                format!("实例「{}」", instance.id)
-            }
+        // 错误信息优先使用监听端口标识实例，端口缺失（为 0）时退化为序号与 id
+        let label = if instance.http_port != 0 {
+            format!("监听端口 {}", instance.http_port)
+        } else if instance.id.trim().is_empty() {
+            format!("第 {} 个实例", index + 1)
         } else {
-            format!("实例「{}」", instance.name)
+            format!("实例「{}」", instance.id)
         };
 
         // id 非空且唯一
@@ -199,9 +199,9 @@ pub fn validate(config: &AppConfig) -> Result<(), String> {
         // httpPort 不能为 0，且实例之间不能重复
         if instance.http_port == 0 {
             errors.push(format!("{label} 的 httpPort 不能为 0"));
-        } else if let Some(existing) = ports.insert(instance.http_port, label.clone()) {
+        } else if !ports.insert(instance.http_port) {
             errors.push(format!(
-                "{label} 的 httpPort {} 与 {existing} 重复",
+                "httpPort {} 重复，多个实例不能监听同一端口",
                 instance.http_port
             ));
         }
@@ -247,10 +247,9 @@ mod tests {
     }
 
     /// 构造一个代理实例
-    fn instance(id: &str, name: &str, target: &str, port: u16) -> ProxyInstance {
+    fn instance(id: &str, target: &str, port: u16) -> ProxyInstance {
         ProxyInstance {
             id: id.to_string(),
-            name: name.to_string(),
             enabled: true,
             target: target.to_string(),
             http_port: port,
@@ -265,9 +264,10 @@ mod tests {
         AppConfig {
             version: 1,
             close_behavior: "minimize".to_string(),
+            close_behavior_confirmed: true,
             proxies: vec![
-                instance("a", "实例 A", "https://example.com/v1", 8787),
-                instance("b", "实例 B", "http://127.0.0.1:9000", 8788),
+                instance("a", "https://example.com/v1", 8787),
+                instance("b", "http://127.0.0.1:9000", 8788),
             ],
         }
     }
@@ -349,6 +349,7 @@ mod tests {
         assert!(warning.is_none());
         assert_eq!(config.version, 1);
         assert_eq!(config.close_behavior, "minimize");
+        assert!(!config.close_behavior_confirmed, "默认视为未确认关窗行为");
         assert!(config.proxies.is_empty());
 
         std::fs::remove_dir_all(&dir).ok();
@@ -399,19 +400,27 @@ mod tests {
         assert!(warning.is_none());
         assert_eq!(loaded.version, config.version);
         assert_eq!(loaded.close_behavior, config.close_behavior);
+        assert_eq!(
+            loaded.close_behavior_confirmed,
+            config.close_behavior_confirmed
+        );
         assert_eq!(loaded.proxies.len(), config.proxies.len());
         assert_eq!(loaded.proxies[0].id, config.proxies[0].id);
         assert_eq!(loaded.proxies[0].headers, config.proxies[0].headers);
         assert_eq!(loaded.proxies[0].http_port, config.proxies[0].http_port);
         assert_eq!(loaded.proxies[1].reasoning_effort, None);
 
-        // 未配置的可选字段应能正常反序列化
+        // 未配置的可选字段应能正常反序列化；旧配置中的 name 字段应被忽略
         let parsed = serde_json::from_str::<AppConfig>(
             r#"{"proxies":[{"id":"x","name":"X","enabled":true,"target":"https://a.com","httpPort":8787}]}"#,
         )
         .expect("缺省字段应可省略");
         assert_eq!(parsed.version, 1);
         assert_eq!(parsed.close_behavior, "minimize");
+        assert!(
+            !parsed.close_behavior_confirmed,
+            "旧配置缺少该字段时应视为未确认"
+        );
         assert_eq!(parsed.proxies[0].protocol, "openai");
         assert_eq!(parsed.proxies[0].reasoning_effort, None);
 

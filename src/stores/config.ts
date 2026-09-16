@@ -1,5 +1,5 @@
 // 配置 store：负责配置读写、实例运行状态维护与后端事件订阅
-import { computed, ref } from 'vue';
+import { computed, h, ref } from 'vue';
 import { defineStore } from 'pinia';
 import { ElMessage, ElNotification } from 'element-plus';
 import {
@@ -45,17 +45,17 @@ export const useConfigStore = defineStore('config', () => {
   const enabledCount = computed(() => instances.value.filter((item) => item.enabled).length);
 
   /**
-   * 根据实例 id 查找显示名称，找不到时回退为 id 本身。
+   * 根据实例 id 获取监听端口号（用于多条提示文案拼接），找不到实例时回退为 id 文本。
    * @param id 实例 id
-   * @returns 实例名称
+   * @returns 端口号文本或 id
    */
-  function resolveInstanceName(id: string): string {
+  function resolveInstancePort(id: string): string {
     const fromInstances = instances.value.find((item) => item.id === id);
     if (fromInstances) {
-      return fromInstances.name;
+      return String(fromInstances.httpPort);
     }
     const fromConfig = config.value?.proxies.find((item) => item.id === id);
-    return fromConfig?.name ?? id;
+    return fromConfig ? String(fromConfig.httpPort) : id;
   }
 
   /** 重新拉取实例列表并覆盖本地状态 */
@@ -95,8 +95,8 @@ export const useConfigStore = defineStore('config', () => {
     try {
       const result = await saveConfig(next);
       if (result.restartRequired.length > 0) {
-        const names = result.restartRequired.map(resolveInstanceName).join('、');
-        ElMessage.warning(`实例 ${names} 需重启后生效`);
+        const ports = result.restartRequired.map(resolveInstancePort).join('、');
+        ElMessage.warning(`端口 ${ports} 需重启后生效`);
       } else {
         ElMessage.success('配置已保存');
       }
@@ -121,7 +121,10 @@ export const useConfigStore = defineStore('config', () => {
       await action(id);
       await refreshInstances();
     } catch (err) {
-      ElMessage.error(`操作失败：${toErrorMessage(err)}`);
+      const message = toErrorMessage(err);
+      // 记录该错误：随后到达的 instance-state 事件不再重复弹出同一文案
+      notifiedErrors.set(id, message);
+      ElMessage.error(`操作失败：${message}`);
     }
   }
 
@@ -159,7 +162,7 @@ export const useConfigStore = defineStore('config', () => {
     try {
       await action();
     } catch (err) {
-      // 后端会聚合失败实例的原因（形如「实例名」失败原因）
+      // 后端会聚合各实例的失败原因（失败原因中已带端口标识）
       failure = `${label}失败：${toErrorMessage(err)}`;
     }
     try {
@@ -182,9 +185,46 @@ export const useConfigStore = defineStore('config', () => {
 
   /**
    * 启动全部已启用且当前未运行的实例（跳过原本禁用的实例）。
+   * 部分实例启动失败（如端口被占用）时，其余实例照常启动，并提示失败明细。
    */
-  function startAll(): Promise<void> {
-    return runBatchAction(startAllInstances, '启动全部实例');
+  async function startAll(): Promise<void> {
+    try {
+      const outcome = await startAllInstances();
+      // 失败原因已在下方通知中提示，记录以避免 instance-state 事件重复弹出
+      for (const failure of outcome.failures) {
+        notifiedErrors.set(failure.id, failure.reason);
+      }
+
+      if (outcome.failures.length === 0) {
+        if (outcome.startedCount > 0) {
+          ElMessage.success(`已启动 ${outcome.startedCount} 个实例`);
+        }
+      } else {
+        ElNotification({
+          title: '部分实例启动失败',
+          type: outcome.startedCount > 0 ? 'warning' : 'error',
+          duration: 0,
+          message: h('div', { style: 'line-height: 1.7' }, [
+            h(
+              'div',
+              outcome.startedCount > 0
+                ? `其余 ${outcome.startedCount} 个实例已正常启动；以下 ${outcome.failures.length} 个实例未能启动：`
+                : `以下 ${outcome.failures.length} 个实例未能启动：`,
+            ),
+            ...outcome.failures.map((failure) => h('div', failure.reason)),
+          ]),
+        });
+      }
+    } catch (err) {
+      ElMessage.error(`启动全部实例失败：${toErrorMessage(err)}`);
+    } finally {
+      // 无论成败都刷新，保证界面与实际运行状态一致
+      try {
+        await refreshInstances();
+      } catch (err) {
+        ElMessage.error(`刷新实例状态失败：${toErrorMessage(err)}`);
+      }
+    }
   }
 
   /**
@@ -205,21 +245,43 @@ export const useConfigStore = defineStore('config', () => {
     await save({
       version: current.version,
       closeBehavior: current.closeBehavior,
+      closeBehaviorConfirmed: current.closeBehaviorConfirmed,
       proxies: current.proxies,
     });
   }
 
+  // 每个实例最近一次已提示过的错误信息，避免同一条错误重复弹出提示
+  const notifiedErrors = new Map<string, string>();
+
   /**
    * 就地更新指定实例的状态（供 instance-state 事件回调使用）。
+   * 实例进入 error 状态且原因非空时弹出通知（同一错误只提示一次）。
    * @param evt 实例状态事件负载
    */
   function applyInstanceState(evt: InstanceStateEvent): void {
     const target = instances.value.find((item) => item.id === evt.id);
-    if (!target) {
-      return;
+    if (target) {
+      target.state = evt.state;
+      target.error = evt.error ?? null;
     }
-    target.state = evt.state;
-    target.error = evt.error ?? null;
+
+    const error = evt.error ?? null;
+    if (evt.state === 'error' && error) {
+      // 手动操作失败时 runInstanceAction 已用相同文案提示过，这里通过记录去重
+      if (notifiedErrors.get(evt.id) !== error) {
+        notifiedErrors.set(evt.id, error);
+        ElNotification({
+          title: '实例运行异常',
+          // 找不到实例（如已被删除）时只展示错误原因
+          message: target ? `端口 ${target.httpPort}：${error}` : error,
+          type: 'error',
+          duration: 8000,
+        });
+      }
+    } else if (evt.state !== 'error') {
+      // 恢复正常后清除记录，便于下次同样的错误再次提示
+      notifiedErrors.delete(evt.id);
+    }
   }
 
   /** 订阅后端事件：日志转发到 logs store，实例状态就地更新；重复调用不会重复订阅 */

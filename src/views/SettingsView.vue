@@ -75,6 +75,7 @@ watch(
 
 /**
  * 保存关窗行为：沿用当前配置的版本号与实例列表，仅替换 closeBehavior。
+ * 用户在设置中做出明确选择，同时标记为已确认（之后关窗不再弹窗询问）。
  * store 内部已处理成功/失败提示与配置刷新，保存结束后按钮自动恢复可用。
  */
 async function handleSave(): Promise<void> {
@@ -86,6 +87,7 @@ async function handleSave(): Promise<void> {
   await configStore.save({
     version: current.version,
     closeBehavior: closeBehavior.value,
+    closeBehaviorConfirmed: true,
     proxies: current.proxies,
   });
 }

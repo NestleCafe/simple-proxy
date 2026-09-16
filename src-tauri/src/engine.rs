@@ -25,6 +25,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// 每个上游主机允许的空闲连接数（连接池复用，减少重复握手）
 const POOL_MAX_IDLE_PER_HOST: usize = 16;
 
+/// 端口占用预检时探测单个回环地址的超时；连接被拒绝通常立即返回，此处仅作兜底
+const PORT_PROBE_TIMEOUT: Duration = Duration::from_millis(300);
+
 /// get_config 命令的返回：配置内容 + 配置损坏时的加载警告
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -33,6 +36,8 @@ pub struct ConfigPayload {
     pub version: u32,
     /// 关窗行为：minimize | exit
     pub close_behavior: String,
+    /// 是否已确认过关窗行为：false 时首次关闭窗口需弹窗询问
+    pub close_behavior_confirmed: bool,
     /// 代理实例列表
     pub proxies: Vec<ProxyInstance>,
     /// 配置损坏提示；正常为 None
@@ -45,8 +50,6 @@ pub struct ConfigPayload {
 pub struct InstanceInfo {
     /// 实例唯一标识
     pub id: String,
-    /// 实例名称
-    pub name: String,
     /// 是否启用
     pub enabled: bool,
     /// 转发目标地址
@@ -73,6 +76,26 @@ pub struct InstanceInfo {
 pub struct SaveConfigResult {
     /// 需要重启才能生效的实例 id 列表
     pub restart_required: Vec<String>,
+}
+
+/// 批量启动结果：成功数量与失败明细，供界面提示「哪些实例未能启动」
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartAllOutcome {
+    /// 已成功启动的实例数量
+    pub started_count: usize,
+    /// 启动失败的实例明细（如端口被占用）
+    pub failures: Vec<StartFailure>,
+}
+
+/// 批量启动中单个实例的失败信息
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartFailure {
+    /// 实例 id
+    pub id: String,
+    /// 失败原因（中文）
+    pub reason: String,
 }
 
 /// 实例运行状态
@@ -134,15 +157,13 @@ struct EngineInner {
 }
 
 impl EngineInner {
-    /// 实例展示名：优先取配置中的名称，缺失（已删除或名称为空）时退化为 id
+    /// 实例展示标识：按 id 找到实例后返回「端口 {httpPort}」，缺失（已删除）时退化为 id
     fn instance_label(&self, id: &str) -> String {
         self.config
             .proxies
             .iter()
             .find(|item| item.id == id)
-            .map(|item| item.name.trim())
-            .filter(|name| !name.is_empty())
-            .map(str::to_string)
+            .map(|item| format!("端口 {}", item.http_port))
             .unwrap_or_else(|| id.to_string())
     }
 }
@@ -233,8 +254,8 @@ impl Engine {
             let runtime = inner.runtimes.entry(id.to_string()).or_default();
             if runtime.transitioning {
                 return Err(format!(
-                    "实例「{}」正在启动或停止中，请稍后重试",
-                    instance.name
+                    "端口 {} 正在启动或停止中，请稍后重试",
+                    instance.http_port
                 ));
             }
             if runtime.state == InstanceState::Running {
@@ -244,17 +265,38 @@ impl Engine {
             instance
         };
 
-        // 2. 绑定监听端口（0.0.0.0，与 legacy 版本的默认监听行为一致）
-        let listener = match tokio::net::TcpListener::bind(("0.0.0.0", instance.http_port)).await {
+        // 2. 端口占用预检：Windows 允许 IPv4 通配（0.0.0.0）与 IPv6 通配（::）并存绑定同一端口，
+        //    别的程序（如 Node，绑定 ::）占用端口时下面的 bind 仍会成功，
+        //    故先按回环地址探测，避免误判为「启动成功」而实际流量归属混乱。
+        if is_port_occupied(instance.http_port).await {
+            let message = format!(
+                "监听端口 {} 失败：端口已被其他程序占用",
+                instance.http_port
+            );
+            // 复位 transitioning 状态并推送错误事件后再返回
+            mark_instance_error(&self.app, id, &message);
+            return Err(message);
+        }
+
+        // 3. 绑定监听端口（仅回环地址：代理只服务本机 Agent，不暴露到局域网）
+        let listener = match tokio::net::TcpListener::bind(("127.0.0.1", instance.http_port)).await {
             Ok(listener) => listener,
             Err(err) => {
-                let message = format!("监听端口 {} 失败（{err}）", instance.http_port);
+                // 端口被占用是最常见的失败原因，给出更直白的提示
+                let message = if err.kind() == std::io::ErrorKind::AddrInUse {
+                    format!(
+                        "监听端口 {} 失败：端口已被其他程序占用",
+                        instance.http_port
+                    )
+                } else {
+                    format!("监听端口 {} 失败（{err}）", instance.http_port)
+                };
                 mark_instance_error(&self.app, id, &message);
                 return Err(message);
             }
         };
 
-        // 3. 构建代理服务并后台运行；停止时通过 oneshot 触发优雅关闭
+        // 4. 构建代理服务并后台运行；停止时通过 oneshot 触发优雅关闭
         let router = proxy::build_router(
             self.client.clone(),
             Arc::new(instance_to_runtime_config(&instance)),
@@ -275,7 +317,7 @@ impl Engine {
             }
         });
 
-        // 4. 记录运行态并通知前端
+        // 5. 记录运行态并通知前端
         {
             let mut inner = self.lock_inner();
             let runtime = inner.runtimes.entry(id.to_string()).or_default();
@@ -291,7 +333,7 @@ impl Engine {
         logbus::emit_info_log(
             &self.app,
             id,
-            &instance.name,
+            instance.http_port,
             &instance.target,
             &format!(
                 "监听已启动: http://127.0.0.1:{} => {}",
@@ -306,20 +348,21 @@ impl Engine {
     /// 幂等：未运行时归一化为 stopped 并直接返回 `Ok`。仅影响该实例。
     pub async fn stop_instance(&self, id: &str) -> Result<(), String> {
         // 1. 锁内取出运行资源（不跨 await 持有锁）
-        let (taken, name, target) = {
+        let (taken, port, target) = {
             let mut inner = self.lock_inner();
             let label = inner.instance_label(id);
             let runtime = inner.runtimes.entry(id.to_string()).or_default();
 
             if runtime.transitioning {
-                return Err(format!("实例「{label}」正在启动或停止中，请稍后重试"));
+                return Err(format!("{label} 正在启动或停止中，请稍后重试"));
             }
 
-            let name = runtime
+            // 日志展示启动时配置副本中的监听端口与目标；未运行时不产生日志，取默认值即可
+            let port = runtime
                 .started_config
                 .as_ref()
-                .map(|item| item.name.clone())
-                .unwrap_or_else(|| label.clone());
+                .map(|item| item.http_port)
+                .unwrap_or_default();
             let target = runtime
                 .started_config
                 .as_ref()
@@ -331,12 +374,12 @@ impl Engine {
                 runtime.state = InstanceState::Stopped;
                 runtime.error = None;
                 runtime.started_config = None;
-                (None, name, target)
+                (None, port, target)
             } else {
                 runtime.transitioning = true;
                 (
                     Some((runtime.shutdown.take(), runtime.handle.take())),
-                    name,
+                    port,
                     target,
                 )
             }
@@ -377,7 +420,7 @@ impl Engine {
         }
 
         logbus::emit_instance_state(&self.app, id, InstanceState::Stopped.as_str(), None);
-        logbus::emit_info_log(&self.app, id, &name, &target, "监听已停止");
+        logbus::emit_info_log(&self.app, id, port, &target, "监听已停止");
         Ok(())
     }
 
@@ -443,33 +486,22 @@ impl Engine {
         Ok(plan.restart_required)
     }
 
-    /// 启动全部启用中的实例（应用启动时调用）；单个实例失败不影响其它实例。
-    pub async fn start_all_enabled(&self) {
-        // 启动流程不向用户报错：失败信息已由 start_instance 记录日志与状态事件
-        let _ = self.start_enabled_instances().await;
-    }
-
     /// 停止全部正在运行的实例（仅改变运行状态，不修改各实例的启用开关，也不写配置）。
     ///
     /// 锁内先收集运行中实例，释放锁后再逐个停止（`stop_instance` 内部会再次加锁，
     /// 严禁在持锁时互调）；单个实例失败不中断其余实例，最终以聚合的中文原因返回。
     pub async fn stop_all(&self) -> Result<(), String> {
-        let targets: Vec<(String, String)> = {
+        let targets: Vec<String> = {
             let inner = self.lock_inner();
             plan_stop_all(&inner.runtimes)
-                .into_iter()
-                .map(|id| {
-                    let label = inner.instance_label(&id);
-                    (id, label)
-                })
-                .collect()
         };
 
         let mut failures = Vec::new();
-        for (id, label) in targets {
+        for id in targets {
             if let Err(err) = self.stop_instance(&id).await {
                 eprintln!("停止实例 {id} 失败: {err}");
-                failures.push(format!("「{label}」{err}"));
+                // 失败原因已带端口标识，直接聚合避免重复描述
+                failures.push(err);
             }
         }
 
@@ -482,41 +514,31 @@ impl Engine {
 
     /// 启动全部已启用但当前未运行的实例（跳过被禁用的实例，不修改配置）。
     ///
-    /// 与 `start_all_enabled` 共用内部实现；单个实例失败不中断其余实例，
-    /// 最终以聚合的中文原因返回。
-    pub async fn start_all(&self) -> Result<(), String> {
-        self.start_enabled_instances().await
-    }
-
-    /// 启动全部「已启用且当前未运行」实例的共用实现。
-    ///
-    /// 锁内先收集目标实例，释放锁后再逐个启动；单个实例失败不中断其余实例，
-    /// 失败信息以 `「实例名」原因` 的形式聚合返回。
-    async fn start_enabled_instances(&self) -> Result<(), String> {
-        let targets: Vec<(String, String)> = {
+    /// 锁内先收集目标实例，释放锁后再逐个启动（`start_instance` 内部会再次加锁，
+    /// 严禁在持锁时互调）；单个实例失败不中断其余实例，
+    /// 返回成功数量与失败明细（含端口被占用等原因），供界面提示哪些实例未能启动。
+    pub async fn start_all(&self) -> Result<StartAllOutcome, String> {
+        let targets: Vec<String> = {
             let inner = self.lock_inner();
             plan_start_all(&inner.config, &inner.runtimes)
-                .into_iter()
-                .map(|id| {
-                    let label = inner.instance_label(&id);
-                    (id, label)
-                })
-                .collect()
         };
 
+        let mut started_count = 0;
         let mut failures = Vec::new();
-        for (id, label) in targets {
-            if let Err(err) = self.start_instance(&id).await {
-                eprintln!("启动实例 {id} 失败: {err}");
-                failures.push(format!("「{label}」{err}"));
+        for id in targets {
+            match self.start_instance(&id).await {
+                Ok(()) => started_count += 1,
+                Err(reason) => {
+                    eprintln!("启动实例 {id} 失败: {reason}");
+                    failures.push(StartFailure { id, reason });
+                }
             }
         }
 
-        if failures.is_empty() {
-            Ok(())
-        } else {
-            Err(failures.join("；"))
-        }
+        Ok(StartAllOutcome {
+            started_count,
+            failures,
+        })
     }
 
     /// 读取配置快照（含加载警告），供 get_config 命令使用
@@ -525,6 +547,7 @@ impl Engine {
         ConfigPayload {
             version: inner.config.version,
             close_behavior: inner.config.close_behavior.clone(),
+            close_behavior_confirmed: inner.config.close_behavior_confirmed,
             proxies: inner.config.proxies.clone(),
             load_warning: inner.load_warning.clone(),
         }
@@ -541,7 +564,6 @@ impl Engine {
                 let runtime = inner.runtimes.get(&instance.id);
                 InstanceInfo {
                     id: instance.id.clone(),
-                    name: instance.name.clone(),
                     enabled: instance.enabled,
                     target: instance.target.clone(),
                     http_port: instance.http_port,
@@ -562,16 +584,41 @@ impl Engine {
         self.lock_inner().config.close_behavior.clone()
     }
 
-    /// 把实例状态置为 error 并释放监听资源，返回 (名称, 目标地址) 供日志展示使用
-    fn set_error_state(&self, id: &str, message: &str) -> (String, String) {
+    /// 读取关窗行为是否已被用户确认（false 时首次关闭窗口需弹窗询问）
+    pub fn close_behavior_confirmed(&self) -> bool {
+        self.lock_inner().config.close_behavior_confirmed
+    }
+
+    /// 更新关窗行为并标记为已确认（用户通过关窗询问或设置页做出选择）。
+    ///
+    /// 校验通过后在锁内更新内存配置并取出快照，释放锁后再写盘，避免持锁做磁盘 IO。
+    pub async fn set_close_behavior(&self, behavior: &str) -> Result<(), String> {
+        if behavior != "minimize" && behavior != "exit" {
+            return Err(format!(
+                "closeBehavior 取值非法（{behavior}），仅支持 minimize 或 exit"
+            ));
+        }
+
+        let (config, config_path) = {
+            let mut inner = self.lock_inner();
+            inner.config.close_behavior = behavior.to_string();
+            inner.config.close_behavior_confirmed = true;
+            (inner.config.clone(), inner.config_path.clone())
+        };
+
+        config::save(&config_path, &config)
+    }
+
+    /// 把实例状态置为 error 并释放监听资源，返回 (监听端口, 目标地址) 供日志展示使用
+    fn set_error_state(&self, id: &str, message: &str) -> (u16, String) {
         let mut inner = self.lock_inner();
-        let (name, target) = inner
+        let (port, target) = inner
             .config
             .proxies
             .iter()
             .find(|item| item.id == id)
-            .map(|item| (item.name.clone(), item.target.clone()))
-            .unwrap_or_else(|| (id.to_string(), String::new()));
+            .map(|item| (item.http_port, item.target.clone()))
+            .unwrap_or_default();
 
         let runtime = inner.runtimes.entry(id.to_string()).or_default();
         runtime.state = InstanceState::Error;
@@ -580,7 +627,7 @@ impl Engine {
         runtime.handle = None;
         runtime.started_config = None;
         runtime.transitioning = false;
-        (name, target)
+        (port, target)
     }
 }
 
@@ -588,7 +635,7 @@ impl Engine {
 fn instance_to_runtime_config(instance: &ProxyInstance) -> InstanceRuntimeConfig {
     InstanceRuntimeConfig {
         instance_id: instance.id.clone(),
-        instance_name: instance.name.clone(),
+        http_port: instance.http_port,
         target: instance.target.clone(),
         protocol: instance.protocol.clone(),
         reasoning_effort: instance.reasoning_effort.clone(),
@@ -596,20 +643,36 @@ fn instance_to_runtime_config(instance: &ProxyInstance) -> InstanceRuntimeConfig
     }
 }
 
+/// 检测端口是否已被其他程序监听：分别尝试连接 IPv4/IPv6 回环地址，任一成功即视为已占用。
+async fn is_port_occupied(port: u16) -> bool {
+    for addr in [("127.0.0.1", port), ("::1", port)] {
+        // 连接被拒绝通常立即返回；仅在异常网络环境下可能阻塞，故加超时兜底
+        if let Ok(Ok(_)) = tokio::time::timeout(
+            PORT_PROBE_TIMEOUT,
+            tokio::net::TcpStream::connect(addr),
+        )
+        .await
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// 记录实例错误：状态置 error 并推送状态与日志事件。
 ///
 /// 引擎尚未注册到 Tauri（应用退出过程中）时仅推送事件。
 fn mark_instance_error(app: &AppHandle, id: &str, message: &str) {
-    let mut name = id.to_string();
+    let mut port = 0;
     let mut target = String::new();
     if let Some(engine) = app.try_state::<Engine>() {
-        let (instance_name, instance_target) = engine.set_error_state(id, message);
-        name = instance_name;
+        let (instance_port, instance_target) = engine.set_error_state(id, message);
+        port = instance_port;
         target = instance_target;
     }
 
     logbus::emit_instance_state(app, id, InstanceState::Error.as_str(), Some(message));
-    logbus::emit_info_log(app, id, &name, &target, message);
+    logbus::emit_info_log(app, id, port, &target, message);
 }
 
 /// 保存配置后需要执行的启停动作计划
@@ -627,7 +690,7 @@ struct SavePlan {
 
 /// 判断两个实例的转发相关字段是否一致（不一致则需重启才能生效）
 ///
-/// 只比较影响转发行为的字段：名称、启用开关等变化无需重启。
+/// 只比较影响转发行为的字段：启用开关等变化无需重启。
 fn forwarding_config_equal(started: &ProxyInstance, current: &ProxyInstance) -> bool {
     started.target == current.target
         && started.http_port == current.http_port
@@ -726,7 +789,6 @@ mod tests {
     fn instance(id: &str) -> ProxyInstance {
         ProxyInstance {
             id: id.to_string(),
-            name: format!("实例 {id}"),
             enabled: true,
             target: "https://example.com/v1".to_string(),
             http_port: 8787,
@@ -741,6 +803,7 @@ mod tests {
         AppConfig {
             version: 1,
             close_behavior: "minimize".to_string(),
+            close_behavior_confirmed: true,
             proxies,
         }
     }
@@ -815,13 +878,13 @@ mod tests {
     }
 
     #[test]
-    fn 仅名称变化不需要重启() {
-        let started = instance("a");
-        let mut renamed = started.clone();
-        renamed.name = "新名称".to_string();
+    fn 仅启用标记变化不需要重启() {
+        let mut started = instance("a");
+        started.enabled = false;
 
+        // 当前配置为已启用：仅启用标记不同，转发字段未变，不应提示重启
         let plan = plan_save_changes(
-            &config_of(vec![renamed]),
+            &config_of(vec![instance("a")]),
             &running_of(vec![started]),
             &ids_of(&["a"]),
         );
@@ -996,6 +1059,23 @@ mod tests {
         assert_eq!(
             plan_start_all(&config, &HashMap::new()),
             ids_of(&["a", "b"])
+        );
+    }
+
+    #[tokio::test]
+    async fn 回环地址被监听时端口判定为已占用() {
+        // 随机端口并保持监听：预检应判定为已占用
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("绑定随机端口失败");
+        let port = listener.local_addr().expect("获取监听地址失败").port();
+        assert!(is_port_occupied(port).await, "监听中的端口应判定为已占用");
+
+        // 释放监听后应不再判定为占用（连接被拒绝）
+        drop(listener);
+        assert!(
+            !is_port_occupied(port).await,
+            "已释放的端口不应判定为已占用"
         );
     }
 }

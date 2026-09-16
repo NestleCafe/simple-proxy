@@ -3,11 +3,13 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type {
   AppConfig,
+  CloseBehavior,
   ConfigPayload,
   InstanceInfo,
   InstanceStateEvent,
   LogEntry,
   SaveConfigResult,
+  StartAllOutcome,
 } from '../types';
 
 /**
@@ -69,10 +71,10 @@ export function stopAllInstances(): Promise<void> {
 
 /**
  * 启动全部已启用且当前未运行的代理实例（跳过原本禁用的实例）。
- * 单个实例失败不中断其余实例，此时会以中文原因拒绝。
+ * 单个实例失败（如端口被占用）不中断其余实例，返回成功数量与失败明细。
  */
-export function startAllInstances(): Promise<void> {
-  return invoke<void>('start_all_instances');
+export function startAllInstances(): Promise<StartAllOutcome> {
+  return invoke<StartAllOutcome>('start_all_instances');
 }
 
 /**
@@ -91,4 +93,23 @@ export function onProxyLog(handler: (entry: LogEntry) => void): Promise<Unlisten
  */
 export function onInstanceState(handler: (state: InstanceStateEvent) => void): Promise<UnlistenFn> {
   return listen<InstanceStateEvent>('instance-state', (event) => handler(event.payload));
+}
+
+/**
+ * 订阅「关闭窗口」询问事件（close-requested）：尚未确认关窗行为时，
+ * 后端会阻止关闭并推送该事件，由前端弹窗询问用户。
+ * @param handler 收到关闭请求时的回调
+ * @returns 取消订阅函数
+ */
+export function onCloseRequested(handler: () => void): Promise<UnlistenFn> {
+  return listen('close-requested', () => handler());
+}
+
+/**
+ * 响应「关闭窗口」询问：按所选行为执行（隐藏到托盘 / 退出应用）。
+ * @param behavior 关窗行为：minimize（最小化到托盘）/ exit（直接退出应用）
+ * @param remember 是否记住本次选择（写入配置，之后关窗不再询问）
+ */
+export function resolveCloseRequest(behavior: CloseBehavior, remember: boolean): Promise<void> {
+  return invoke<void>('resolve_close_request', { behavior, remember });
 }

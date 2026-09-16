@@ -60,7 +60,9 @@ pub fn init(app: &AppHandle) -> tauri::Result<()> {
 }
 
 /// 显示并聚焦主窗口；窗口不存在时静默忽略。
-fn show_main_window(app: &AppHandle) {
+///
+/// 供托盘事件与「第二个实例启动」回调复用。
+pub fn show_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
         let _ = window.show();
         let _ = window.set_focus();

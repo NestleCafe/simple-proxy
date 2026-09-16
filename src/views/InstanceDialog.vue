@@ -6,9 +6,6 @@
     :close-on-click-modal="false"
   >
     <el-form ref="formRef" :model="form" :rules="rules" label-width="96px">
-      <el-form-item label="名称" prop="name">
-        <el-input v-model="form.name" placeholder="请输入实例名称" clearable />
-      </el-form-item>
       <el-form-item label="目标地址" prop="target">
         <el-input v-model="form.target" placeholder="如 https://api.openai.com" clearable />
       </el-form-item>
@@ -67,7 +64,6 @@ interface HeaderRow {
 
 // 对话框表单的数据结构
 interface InstanceForm {
-  name: string;
   target: string;
   httpPort: number;
   protocol: Protocol;
@@ -84,7 +80,6 @@ const { instance } = toRefs(props);
 const configStore = useConfigStore();
 const formRef = ref<FormInstance>();
 const form = reactive<InstanceForm>({
-  name: '',
   target: '',
   httpPort: DEFAULT_PORT,
   protocol: 'openai',
@@ -117,7 +112,6 @@ function validateTarget(_rule: unknown, value: unknown, callback: (error?: Error
 
 // 表单校验规则
 const rules: FormRules = {
-  name: [{ required: true, message: '请输入实例名称', trigger: 'blur' }],
   target: [
     { required: true, message: '请输入目标地址', trigger: 'blur' },
     { validator: validateTarget, trigger: 'blur' },
@@ -129,7 +123,6 @@ const rules: FormRules = {
 /** 把传入实例的数据（深拷贝请求头）写入本地表单，无实例时重置为默认值 */
 function syncFormFromInstance(): void {
   const source = instance.value;
-  form.name = source?.name ?? '';
   form.target = source?.target ?? '';
   form.httpPort = source?.httpPort ?? DEFAULT_PORT;
   form.protocol = source?.protocol ?? 'openai';
@@ -193,7 +186,6 @@ async function handleSave(): Promise<void> {
   const effort = form.reasoningEffort.trim();
   const payload: ProxyInstance = {
     id: props.instance?.id ?? crypto.randomUUID(),
-    name: form.name.trim(),
     enabled: props.instance?.enabled ?? true,
     target: form.target.trim(),
     httpPort: Math.trunc(form.httpPort),
@@ -209,6 +201,7 @@ async function handleSave(): Promise<void> {
   await configStore.save({
     version: current.version,
     closeBehavior: current.closeBehavior,
+    closeBehaviorConfirmed: current.closeBehaviorConfirmed,
     proxies,
   });
   visible.value = false;

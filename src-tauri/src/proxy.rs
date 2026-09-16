@@ -49,8 +49,8 @@ type BoxedByteStream = Pin<Box<dyn futures_util::Stream<Item = Result<Bytes, Box
 pub struct InstanceRuntimeConfig {
     /// 实例唯一标识
     pub instance_id: String,
-    /// 实例名称
-    pub instance_name: String,
+    /// 实例监听端口
+    pub http_port: u16,
     /// 原始 target URL 字符串
     pub target: String,
     /// 目标协议：openai | anthropic
@@ -69,8 +69,8 @@ pub struct AccessLogEntry {
     pub time: String,
     /// 实例 id
     pub instance_id: String,
-    /// 实例名称
-    pub instance_name: String,
+    /// 实例监听端口
+    pub instance_port: u16,
     /// 请求方法
     pub method: String,
     /// 客户端原始 path（含 query）
@@ -431,7 +431,7 @@ fn base_entry(
     AccessLogEntry {
         time: now_local_string(),
         instance_id: cfg.instance_id.clone(),
-        instance_name: cfg.instance_name.clone(),
+        instance_port: cfg.http_port,
         method: method.as_str().to_string(),
         path: path.to_string(),
         target: target.to_string(),
@@ -569,7 +569,7 @@ mod tests {
     fn runtime_config(target: &str, protocol: &str, effort: Option<&str>) -> InstanceRuntimeConfig {
         InstanceRuntimeConfig {
             instance_id: "test".to_string(),
-            instance_name: "测试实例".to_string(),
+            http_port: 8787,
             target: target.to_string(),
             protocol: protocol.to_string(),
             reasoning_effort: effort.map(|value| value.to_string()),
